@@ -17,11 +17,14 @@ import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import android.net.Uri
 
 class MainActivity : Activity() {
 
     private val fields = LinkedHashMap<String, EditText>()
     private val switches = LinkedHashMap<String, Switch>()
+    private val infos = LinkedHashMap<String, TextView>()
+    private val reqKeys = LinkedHashMap<Int, String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,7 +46,7 @@ class MainActivity : Activity() {
 
         toggle(root, Rules.K_CLOSE, "Закрывать открытое видео из блок-листа")
         toggle(root, Rules.K_TAP_REDIRECT, "Нажатие по плашке «ИИ-контент скрыт» сразу открывает случайную ссылку из списка ниже")
-        multi(root, Rules.K_REDIRECT, "Ссылки для перехода вместо запрещённого видео (по одной в строке; каждый раз берётся случайная; пусто = просто «Назад»)", 6)
+        fileList(root, Rules.K_REDIRECT, 201, "Ссылки для перехода вместо запрещённого видео (файл .txt, по одной в строке; каждый раз берётся случайная; пусто = просто «Назад»)", "ссылок")
         single(root, Rules.K_REDIRECT_DELAY, "Через сколько секунд после открытия запрещённого видео переходить (0 = сразу)")
 
         // ---- Groq ----
@@ -61,7 +64,7 @@ class MainActivity : Activity() {
         // ---- Списки ----
         multi(root, Rules.K_ALLOW, "НЕ блокировать эти каналы (имеет приоритет над всем)", 3)
         multi(root, Rules.K_LEARNED, "Выученные каналы (добавляются автоматически; лишнее удалите)", 4)
-        multi(root, Rules.K_CHANNELS, "Каналы/авторы вручную (регистр не важен)", 6)
+        fileList(root, Rules.K_CHANNELS, 202, "Каналы/авторы (файл .txt, одно название в строке)", "каналов")
         multi(root, Rules.K_STRONG, "Сильные шаблоны (regex, достаточно одного совпадения)", 6)
         multi(root, Rules.K_WEAK, "Слабые признаки (regex, закрываем при 2+ совпадениях)", 6)
 
@@ -76,9 +79,11 @@ class MainActivity : Activity() {
         root.addView(Button(this).apply {
             text = "Сбросить списки и промпт к умолчанию"
             setOnClickListener {
-                listOf(Rules.K_PROMPT, Rules.K_CHANNELS, Rules.K_STRONG, Rules.K_WEAK).forEach { k ->
+                listOf(Rules.K_PROMPT, Rules.K_STRONG, Rules.K_WEAK).forEach { k ->
                     fields[k]?.setText(Rules.defaults.getValue(k))
                 }
+                Rules.set(this@MainActivity, Rules.K_CHANNELS, Rules.defaults.getValue(Rules.K_CHANNELS))
+                refreshInfo(Rules.K_CHANNELS)
             }
         })
 
@@ -107,6 +112,56 @@ class MainActivity : Activity() {
         root.addView(logView)
 
         setContentView(ScrollView(this).apply { addView(root) })
+    }
+
+    /** Список из файла: счётчик, «Загрузить из .txt» (добавляет без дублей) и «Очистить». Сохраняется сразу. */
+    private fun fileList(parent: LinearLayout, key: String, req: Int, label: String, noun: String) {
+        reqKeys[req] = key
+        parent.addView(TextView(this).apply {
+            text = label
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, 32, 0, 8)
+        })
+        infos[key] = TextView(this).also { parent.addView(it) }
+        parent.addView(Button(this).apply {
+            text = "Загрузить из .txt (добавить к списку)"
+            setOnClickListener {
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                }, req)
+            }
+        })
+        parent.addView(Button(this).apply {
+            text = "Очистить список"
+            setOnClickListener { Rules.set(this@MainActivity, key, ""); refreshInfo(key) }
+        })
+        refreshInfo(key)
+    }
+
+    private fun refreshInfo(key: String) {
+        val n = Rules.lines(Rules.get(this, key)).size
+        infos[key]?.text = "Сейчас в списке: $n"
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        val key = reqKeys[requestCode] ?: return
+        if (resultCode != RESULT_OK) return
+        val uri: Uri = data?.data ?: return
+        try {
+            val text = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+            val loaded = Rules.lines(text.removePrefix("\uFEFF"))
+            val cur = Rules.lines(Rules.get(this, key))
+            val seen = cur.map { it.lowercase() }.toMutableSet()
+            val added = loaded.filter { seen.add(it.lowercase()) }
+            Rules.set(this, key, (cur + added).joinToString("\n"))
+            refreshInfo(key)
+            Toast.makeText(this, "Добавлено: ${added.size} из ${loaded.size}", Toast.LENGTH_LONG).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Не удалось прочитать файл: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun title(parent: LinearLayout, text: String) {
