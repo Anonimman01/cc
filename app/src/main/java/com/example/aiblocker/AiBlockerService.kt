@@ -426,21 +426,45 @@ class AiBlockerService : AccessibilityService() {
     private fun leaveBlocked(stillBlocked: () -> Boolean) {
         if (leaving) return
         leaving = true
-        val url = Rules.get(this, Rules.K_REDIRECT).trim()
-        val sec = Rules.get(this, Rules.K_REDIRECT_DELAY).toDoubleOrNull() ?: 3.0
-        val delay = if (url.isEmpty()) 0L else (sec.coerceIn(0.0, 30.0) * 1000).toLong()
-        if (url.isNotEmpty()) toast("AI Blocker: запрещённое видео, переход через ${sec.toInt()} с")
+        val hasUrl = Rules.lines(Rules.get(this, Rules.K_REDIRECT)).isNotEmpty()
+        val sec = Rules.get(this, Rules.K_REDIRECT_DELAY).toDoubleOrNull() ?: 0.0
+        val delay = if (hasUrl) (sec.coerceIn(0.0, 30.0) * 1000).toLong() else 0L
+        if (hasUrl && delay > 0) toast("AI Blocker: запрещённое видео, переход через ${sec.toInt()} с")
         handler.postDelayed({
             leaving = false
             if (!stillBlocked()) return@postDelayed
             lastBackAt = SystemClock.uptimeMillis()
-            if (url.isNotEmpty() && openUrl(url)) {
+            val url = pickRedirect()
+            if (url != null && openUrl(url)) {
                 Dbg.add(this, "переход: открыл ссылку из настроек")
                 return@postDelayed
             }
             performGlobalAction(GLOBAL_ACTION_BACK)
             Dbg.add(this, "назад: закрыл страницу")
         }, delay)
+    }
+
+    private var lastRedirect = ""
+
+    /** Случайная ссылка из списка в настройках, по возможности не та же, что в прошлый раз. */
+    private fun pickRedirect(): String? {
+        val all = Rules.lines(Rules.get(this, Rules.K_REDIRECT))
+        if (all.isEmpty()) return null
+        val pool = all.filter { it != lastRedirect }.ifEmpty { all }
+        return pool.random().also { lastRedirect = it }
+    }
+
+    private var lastTapRedirectAt = 0L
+
+    /** Нажатие по плашке: вместо запрещённого видео сразу открываем случайную ссылку (только в YouTube). */
+    private fun onOverlayTap() {
+        if (Rules.get(this, Rules.K_TAP_REDIRECT) != "1" || lastPkg != YOUTUBE) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastTapRedirectAt < 2000) return
+        val url = pickRedirect() ?: return
+        lastTapRedirectAt = now
+        lastBackAt = now
+        if (openUrl(url)) Dbg.add(this, "нажатие по плашке: открыл ссылку из настроек")
     }
 
     private fun openUrl(url: String): Boolean = try {
@@ -705,6 +729,8 @@ class AiBlockerService : AccessibilityService() {
                 val slop = resources.displayMetrics.density * 24
                 if (abs(ev.rawX - downX) > slop || abs(ev.rawY - downY) > slop) {
                     forwardSwipe(downX, downY, ev.rawX, ev.rawY, ev.eventTime - downT)
+                } else if (ev.eventTime - downT < 500) {
+                    onOverlayTap()
                 }
             }
         }

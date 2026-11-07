@@ -47,6 +47,8 @@ object Rules {
     const val K_CLOSE = "close_open"    // "1": нажимать «Назад», если открылось видео из блок-листа
     const val K_REDIRECT = "redirect_url"       // куда переходить вместо закрытой страницы (пусто = «Назад»)
     const val K_REDIRECT_DELAY = "redirect_sec" // через сколько секунд
+    const val K_TAP_REDIRECT = "tap_redirect"   // "1": нажатие по плашке сразу открывает ссылку из списка
+    private const val K_VER_REDIRECT = "ver_redirect"
     const val K_VERSION = "ver"         // версия набора значений по умолчанию
 
     private const val VERSION = 2
@@ -175,7 +177,8 @@ TopLove
         K_WATCH to "1",
         K_CLOSE to "1",
         K_REDIRECT to "https://www.youtube.com/live/akBFTyfKTrA?si=G1UBehIjJyz3N5lq",
-        K_REDIRECT_DELAY to "3"
+        K_REDIRECT_DELAY to "0",
+        K_TAP_REDIRECT to "1"
     )
 
     fun get(ctx: Context, key: String): String =
@@ -197,6 +200,10 @@ TopLove
      */
     fun migrate(ctx: Context) {
         val sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        // отдельная миграция: задержка перехода теперь 0 по умолчанию (остальные настройки не трогаем)
+        if (sp.getInt(K_VER_REDIRECT, 0) < 1) {
+            sp.edit().putString(K_REDIRECT_DELAY, "0").putInt(K_VER_REDIRECT, 1).apply()
+        }
         if (sp.getInt(K_VERSION, 0) >= VERSION) return
         val old = lines(OLD_STRONG).toSet()
         val userStrong = lines(get(ctx, K_STRONG)).filter { it !in old }
