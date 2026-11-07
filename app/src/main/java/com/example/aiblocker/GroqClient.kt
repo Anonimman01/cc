@@ -12,6 +12,9 @@ object GroqClient {
     data class Verdict(val channel: String, val category: String, val confidence: Double)
 
     private const val TAG = "AiBlocker"
+
+    @Volatile var lastError: String = ""
+    @Volatile var retryAfterSec: Int = 30
     private const val ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 
     // Формат ответа задаём в коде, чтобы правка промпта в настройках его не сломала
@@ -78,6 +81,8 @@ object GroqClient {
             conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
             if (conn.responseCode !in 200..299) {
                 Log.w(TAG, "Groq HTTP ${conn.responseCode}")
+                lastError = "HTTP ${conn.responseCode} ($model)"
+                retryAfterSec = conn.getHeaderField("retry-after")?.toDoubleOrNull()?.toInt()?.plus(1) ?: 30
                 return null
             }
 
@@ -102,6 +107,8 @@ object GroqClient {
             return out
         } catch (e: Exception) {
             Log.w(TAG, "Groq error: $e")
+            lastError = e.javaClass.simpleName
+            retryAfterSec = 30
             return null
         }
     }

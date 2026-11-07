@@ -3,7 +3,9 @@ package com.example.aiblocker
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
+import android.net.Uri
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Path
@@ -63,6 +65,7 @@ class AiBlockerService : AccessibilityService() {
 
     // ---- автоскрытие через меню YouTube ----
     private val hideDone = LinkedHashSet<String>()
+    private val hideTries = LinkedHashMap<String, Int>()
     private var hideBusy = false
     private var hideGen = 0
     private var lastHideAt = 0L
@@ -134,9 +137,17 @@ class AiBlockerService : AccessibilityService() {
     // ---------------- решение по карточке ----------------
 
     /** 2 = сильное совпадение или канал из списка, 1 = достаточно слабых признаков, 0 = нет. */
+    private fun norm(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
+
+    private fun channelMatch(low: String): Boolean {
+        if (channels.any { low.contains(it) }) return true
+        val n = norm(low)
+        return channels.any { c -> val nc = norm(c); nc.length >= 6 && n.contains(nc) }
+    }
+
     private fun localLevel(text: String, low: String): Int {
         if (strong.any { it.containsMatchIn(text) }) return 2
-        if (channels.any { low.contains(it) }) return 2
+        if (channelMatch(low)) return 2
         return if (weak.count { it.containsMatchIn(text) } >= weakThreshold) 1 else 0
     }
 
@@ -150,7 +161,7 @@ class AiBlockerService : AccessibilityService() {
             2 -> return Decision.BLOCK
             1 -> return Decision.SOFT
         }
-        if (llmOn && pkg in llmPackages && text.length in 30..800) {
+        if (llmOn && pkg in llmPackages && text.length in 15..800) {
             val key = keyOf(text)
             return when (verdicts[key]) {
                 true -> Decision.BLOCK
@@ -195,8 +206,8 @@ class AiBlockerService : AccessibilityService() {
     private fun onResult(batch: List<Pair<String, String>>, res: Map<Int, GroqClient.Verdict>?) {
         batch.forEach { inflight.remove(it.first) }
         if (res == null) { // ошибка сети, лимит или неверный ключ: пауза, чтобы не долбить API
-            pauseUntil = System.currentTimeMillis() + 60_000
-            Dbg.add(this, "Groq: ошибка запроса (лента), пауза 60 с")
+            pauseUntil = System.currentTimeMillis() + pauseSec() * 1000L
+            Dbg.add(this, "Groq: ошибка (лента) ${GroqClient.lastError}, пауза ${pauseSec()} с")
             return
         }
         val threshold = Rules.get(this, Rules.K_THRESHOLD).toDoubleOrNull() ?: 0.65
@@ -305,14 +316,14 @@ class AiBlockerService : AccessibilityService() {
     private fun probeWatch(root: AccessibilityNodeInfo) {
         if (!watchOn || !llmOn || watchScheduled) return
         val now = System.currentTimeMillis()
-        if (now < pauseUntil || now - lastProbeAt < 2000 || now - lastWatchAt < 20_000) return
+        if (now < pauseUntil || now - lastProbeAt < 1200 || now - lastWatchAt < 4_000) return
         lastProbeAt = now
         val texts = collectTexts(root)
         if (pageKind(texts) == 0) { lastWatchKey = null; return }
         val longest = texts.maxByOrNull { it.length } ?: return
         if (keyOf(longest) == lastWatchKey) return
         watchScheduled = true
-        handler.postDelayed({ analyzeWatch() }, 2500) // даём странице догрузить описание
+        handler.postDelayed({ analyzeWatch() }, 1500) // даём странице догрузить описание
     }
 
     private fun analyzeWatch() {
@@ -359,8 +370,8 @@ class AiBlockerService : AccessibilityService() {
 
     private fun onWatchResult(res: Map<Int, GroqClient.Verdict>?, label: Boolean, key: String?) {
         if (res == null) {
-            pauseUntil = System.currentTimeMillis() + 60_000
-            Dbg.add(this, "Groq: ошибка запроса (страница), пауза 60 с")
+            pauseUntil = System.currentTimeMillis() + pauseSec() * 1000L
+            Dbg.add(this, "Groq: ошибка (страница) ${GroqClient.lastError}, пауза ${pauseSec()} с")
             return
         }
         val v = res[0] ?: return
@@ -374,10 +385,10 @@ class AiBlockerService : AccessibilityService() {
             toast("AI Blocker: видео похоже на ИИ, но имя канала определить не удалось")
         }
         // закрываем видео, только если пользователь всё ещё на той же странице
-        if (closeOpen && key != null && key == lastWatchKey &&
-            rootInActiveWindow?.packageName?.toString() == YOUTUBE) {
-            lastBackAt = SystemClock.uptimeMillis()
-            performGlobalAction(GLOBAL_ACTION_BACK)
+        if (closeOpen && key != null) {
+            leaveBlocked {
+                key == lastWatchKey && rootInActiveWindow?.packageName?.toString() == YOUTUBE
+            }
         }
     }
 
@@ -387,16 +398,62 @@ class AiBlockerService : AccessibilityService() {
         val now = SystemClock.uptimeMillis()
         if (now - lastOpenCheckAt < 700 || now - lastBackAt < 2500) return
         lastOpenCheckAt = now
-        if (pageKind(collectTexts(root)) == 0) return
+        if (!openedBlocked(root)) return
+        lastBackAt = now
+        Dbg.add(this, "запрещённая страница открыта: ${collectTexts(root, true).joinToString(" | ").take(60)}")
+        leaveBlocked { rootInActiveWindow?.let { r -> r.packageName?.toString() == YOUTUBE && openedBlocked(r) } == true }
+    }
+
+    /** Открыта страница видео/шортса, у которой название или канал в верхней части экрана из блок-листа. */
+    private fun openedBlocked(root: AccessibilityNodeInfo): Boolean {
+        if (pageKind(collectTexts(root)) == 0) return false
         val top = collectTexts(root, true).joinToString(" | ")
         val low = top.lowercase()
-        if (allow.any { low.contains(it) }) return
-        if (localLevel(top, low) != 2) return
-        lastBackAt = now
-        performGlobalAction(GLOBAL_ACTION_BACK)
-        Dbg.add(this, "назад: закрыл страницу (${top.take(60)})")
-        toast("AI Blocker: страница из блок-листа закрыта")
+        if (allow.any { low.contains(it) }) return false
+        return localLevel(top, low) == 2
     }
+
+    private var leaving = false
+
+    /**
+     * Уходит со страницы запрещённого видео: через N секунд (по умолчанию 3) открывает ссылку из настроек
+     * в приложении YouTube, а если ссылки нет или она не открылась, нажимает «Назад».
+     * stillBlocked проверяется перед самим переходом, чтобы не сбить пользователя, который уже ушёл сам.
+     */
+    private fun leaveBlocked(stillBlocked: () -> Boolean) {
+        if (leaving) return
+        leaving = true
+        val url = Rules.get(this, Rules.K_REDIRECT).trim()
+        val sec = Rules.get(this, Rules.K_REDIRECT_DELAY).toDoubleOrNull() ?: 3.0
+        val delay = if (url.isEmpty()) 0L else (sec.coerceIn(0.0, 30.0) * 1000).toLong()
+        if (url.isNotEmpty()) toast("AI Blocker: запрещённое видео, переход через ${sec.toInt()} с")
+        handler.postDelayed({
+            leaving = false
+            if (!stillBlocked()) return@postDelayed
+            lastBackAt = SystemClock.uptimeMillis()
+            if (url.isNotEmpty() && openUrl(url)) {
+                Dbg.add(this, "переход: открыл ссылку из настроек")
+                return@postDelayed
+            }
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            Dbg.add(this, "назад: закрыл страницу")
+        }, delay)
+    }
+
+    private fun openUrl(url: String): Boolean = try {
+        startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                .setPackage(YOUTUBE)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+        true
+    } catch (e: Exception) {
+        Dbg.add(this, "ссылка не открылась: ${e.javaClass.simpleName}")
+        false
+    }
+
+    /** Пауза после ошибки: при лимите (429) берём Retry-After из ответа, иначе 30 с. */
+    private fun pauseSec(): Int = GroqClient.retryAfterSec.coerceIn(10, 300)
 
     private fun backupKey() = Rules.get(this, Rules.K_API_KEY2).trim()
     private fun backupModel() = Rules.get(this, Rules.K_MODEL2).trim()
@@ -424,8 +481,11 @@ class AiBlockerService : AccessibilityService() {
         val now = SystemClock.uptimeMillis()
         if (now - lastHideAt < 4000) return
         val h = hits.firstOrNull { it.auto && it.key !in hideDone } ?: return
-        hideDone.add(h.key)
+        val tries = (hideTries[h.key] ?: 0) + 1
+        hideTries[h.key] = tries
+        if (tries >= 2) hideDone.add(h.key)
         if (hideDone.size > 300) hideDone.remove(hideDone.first())
+        if (hideTries.size > 600) hideTries.remove(hideTries.keys.first())
         val btn = findMenuButton(root, h.rect)
         if (btn == null) {
             Dbg.add(this, "меню: кнопка «⋮» не найдена. Рядом: " + describeNear(root, h.rect))

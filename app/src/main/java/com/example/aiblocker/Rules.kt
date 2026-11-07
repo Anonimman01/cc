@@ -45,6 +45,8 @@ object Rules {
     const val K_AUTO_HIDE = "auto_hide" // "1": нажимать «Не рекомендовать канал» в меню карточки YouTube
     const val K_WATCH = "watch_scan"    // "1": анализировать страницу видео (описание) через Groq
     const val K_CLOSE = "close_open"    // "1": нажимать «Назад», если открылось видео из блок-листа
+    const val K_REDIRECT = "redirect_url"       // куда переходить вместо закрытой страницы (пусто = «Назад»)
+    const val K_REDIRECT_DELAY = "redirect_sec" // через сколько секунд
     const val K_VERSION = "ver"         // версия набора значений по умолчанию
 
     private const val VERSION = 2
@@ -171,7 +173,9 @@ TopLove
         K_PROMPT to PROMPT.trim(),
         K_AUTO_HIDE to "1",
         K_WATCH to "1",
-        K_CLOSE to "1"
+        K_CLOSE to "1",
+        K_REDIRECT to "https://www.youtube.com/live/akBFTyfKTrA?si=G1UBehIjJyz3N5lq",
+        K_REDIRECT_DELAY to "3"
     )
 
     fun get(ctx: Context, key: String): String =

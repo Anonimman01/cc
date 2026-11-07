@@ -41,7 +41,9 @@ class MainActivity : Activity() {
         title(root, "Скрытие постов")
         toggle(root, Rules.K_AUTO_HIDE, "Убирать пост через меню YouTube («Не рекомендовать канал»)")
 
-        toggle(root, Rules.K_CLOSE, "Закрывать открытое видео из блок-листа (кнопка «Назад»)")
+        toggle(root, Rules.K_CLOSE, "Закрывать открытое видео из блок-листа")
+        single(root, Rules.K_REDIRECT, "Ссылка, на которую переходить вместо закрытого видео (пусто = просто «Назад», на предыдущий экран)")
+        single(root, Rules.K_REDIRECT_DELAY, "Через сколько секунд после открытия запрещённого видео переходить (по умолчанию 3)")
 
         // ---- Groq ----
         title(root, "Проверка через Groq")
