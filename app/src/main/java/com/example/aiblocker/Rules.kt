@@ -3,6 +3,30 @@ package com.example.aiblocker
 import android.content.Context
 
 /** Все настройки хранятся в SharedPreferences (списки - по одному элементу в строке). */
+/** Небольшой журнал событий в отдельном файле настроек (чтобы не дёргать слушатель правил). */
+object Dbg {
+    private const val F = "aiblocker_log"
+    private const val K = "lines"
+    private const val MAX = 60
+
+    @Synchronized
+    fun add(ctx: Context, msg: String) {
+        val sp = ctx.getSharedPreferences(F, Context.MODE_PRIVATE)
+        val t = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        val lines = (sp.getString(K, "") ?: "").lines().filter { it.isNotEmpty() }.takeLast(MAX - 1)
+        sp.edit().putString(K, (lines + "$t $msg".take(400)).joinToString("\n")).apply()
+    }
+
+    @Synchronized
+    fun read(ctx: Context): String =
+        ctx.getSharedPreferences(F, Context.MODE_PRIVATE).getString(K, "") ?: ""
+
+    @Synchronized
+    fun clear(ctx: Context) {
+        ctx.getSharedPreferences(F, Context.MODE_PRIVATE).edit().clear().apply()
+    }
+}
+
 object Rules {
     const val PREFS = "rules"
     const val K_STRONG = "strong"      // regex: одного совпадения достаточно

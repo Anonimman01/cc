@@ -1,16 +1,19 @@
 package com.example.aiblocker
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Path
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -74,6 +77,11 @@ class AiBlockerService : AccessibilityService() {
     private val overlays = mutableListOf<TextView>()
     private val maxOverlays = 8
     private var lastPkg = ""
+    private var overlayTouchable = true
+    private var gestureBusy = false
+    private var downX = 0f
+    private var downY = 0f
+    private var downT = 0L
 
     private val prefsListener =
         SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> reloadRules() }
@@ -188,12 +196,14 @@ class AiBlockerService : AccessibilityService() {
         batch.forEach { inflight.remove(it.first) }
         if (res == null) { // ошибка сети, лимит или неверный ключ: пауза, чтобы не долбить API
             pauseUntil = System.currentTimeMillis() + 60_000
+            Dbg.add(this, "Groq: ошибка запроса (лента), пауза 60 с")
             return
         }
         val threshold = Rules.get(this, Rules.K_THRESHOLD).toDoubleOrNull() ?: 0.65
         batch.forEachIndexed { i, (key, _) ->
             val v = res[i]
             val blocked = v != null && v.category != "normal" && v.confidence >= threshold
+            if (v != null) Dbg.add(this, "Groq лента: ${v.category} ${"%.2f".format(v.confidence)} «${v.channel}»")
             verdicts[key] = blocked
             if (blocked && v != null) learn(v.channel, v.confidence)
         }
@@ -348,8 +358,13 @@ class AiBlockerService : AccessibilityService() {
     }
 
     private fun onWatchResult(res: Map<Int, GroqClient.Verdict>?, label: Boolean, key: String?) {
-        if (res == null) { pauseUntil = System.currentTimeMillis() + 60_000; return }
+        if (res == null) {
+            pauseUntil = System.currentTimeMillis() + 60_000
+            Dbg.add(this, "Groq: ошибка запроса (страница), пауза 60 с")
+            return
+        }
         val v = res[0] ?: return
+        Dbg.add(this, "Groq страница: ${v.category} ${"%.2f".format(v.confidence)} канал=«${v.channel}»")
         val base = Rules.get(this, Rules.K_THRESHOLD).toDoubleOrNull() ?: 0.65
         val threshold = if (label) minOf(base, 0.4) else base // с меткой YouTube порог ниже
         if (v.category == "normal" || v.confidence < threshold) return
@@ -379,6 +394,7 @@ class AiBlockerService : AccessibilityService() {
         if (localLevel(top, low) != 2) return
         lastBackAt = now
         performGlobalAction(GLOBAL_ACTION_BACK)
+        Dbg.add(this, "назад: закрыл страницу (${top.take(60)})")
         toast("AI Blocker: страница из блок-листа закрыта")
     }
 
@@ -411,7 +427,11 @@ class AiBlockerService : AccessibilityService() {
         hideDone.add(h.key)
         if (hideDone.size > 300) hideDone.remove(hideDone.first())
         val btn = findMenuButton(root, h.rect)
-        if (btn == null) { Log.d(TAG, "menu button not found for ${h.key}"); return }
+        if (btn == null) {
+            Dbg.add(this, "меню: кнопка «⋮» не найдена. Рядом: " + describeNear(root, h.rect))
+            return
+        }
+        Dbg.add(this, "меню: нашёл кнопку, нажимаю (карточка: ${h.key.take(50)})")
         hideBusy = true
         lastHideAt = now
         val gen = ++hideGen
@@ -426,7 +446,7 @@ class AiBlockerService : AccessibilityService() {
         var target = findByText(root, dontRecommendRe)
         if (target == null && attempt >= 3) target = findByText(root, notInterestedRe)
         if (target != null && clickNode(target)) {
-            Log.d(TAG, "hidden via menu")
+            Dbg.add(this, "меню: нажал «${(target.text ?: target.contentDescription)?.toString()?.take(40)}»")
             handler.postDelayed({ finishHide() }, 800)
             return
         }
@@ -434,6 +454,7 @@ class AiBlockerService : AccessibilityService() {
             handler.postDelayed({ pickMenuItem(attempt + 1) }, 400)
             return
         }
+        Dbg.add(this, "меню: пункт не найден. На экране: " + collectTexts(root).distinct().take(25).joinToString(" | "))
         // не нашли нужный пункт: если меню открыто, закрываем его
         if (findByText(root, sheetRe) != null) performGlobalAction(GLOBAL_ACTION_BACK)
         val now = SystemClock.uptimeMillis()
@@ -442,6 +463,27 @@ class AiBlockerService : AccessibilityService() {
             toast("AI Blocker: в меню карточки нет пункта «Не рекомендовать канал»")
         }
         finishHide()
+    }
+
+    /** Тексты и описания узлов внутри прямоугольника: для журнала, чтобы видеть реальные подписи кнопок. */
+    private fun describeNear(root: AccessibilityNodeInfo, rect: Rect): String {
+        val out = ArrayList<String>()
+        val queue = java.util.ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        val b = Rect()
+        var n = 0
+        while (n < 700 && out.size < 15) {
+            val node = queue.poll() ?: break
+            n++
+            if (!node.isVisibleToUser) continue
+            node.getBoundsInScreen(b)
+            if (Rect.intersects(b, rect) && node.isClickable) {
+                val s = (node.contentDescription ?: node.text)?.toString()?.trim()
+                if (!s.isNullOrEmpty()) out.add(s.take(30))
+            }
+            for (i in 0 until node.childCount) node.getChild(i)?.let { queue.add(it) }
+        }
+        return out.joinToString(" | ")
     }
 
     private fun finishHide() {
@@ -579,13 +621,65 @@ class AiBlockerService : AccessibilityService() {
             1, 1,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.OPAQUE
-        ).apply { gravity = Gravity.TOP or Gravity.START }
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            if (!overlayTouchable) flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+        tv.setOnTouchListener { _, ev -> onOverlayTouch(ev); true } // нажатия по плашке съедаются
         wm.addView(tv, lp)
         overlays.add(tv)
+    }
+
+    // ---- касания по плашке: нажатие блокируем, свайп повторяем на ленте ----
+
+    private fun onOverlayTouch(ev: MotionEvent) {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> { downX = ev.rawX; downY = ev.rawY; downT = ev.eventTime }
+            MotionEvent.ACTION_UP -> {
+                val slop = resources.displayMetrics.density * 24
+                if (abs(ev.rawX - downX) > slop || abs(ev.rawY - downY) > slop) {
+                    forwardSwipe(downX, downY, ev.rawX, ev.rawY, ev.eventTime - downT)
+                }
+            }
+        }
+    }
+
+    private fun setOverlaysTouchable(t: Boolean) {
+        overlayTouchable = t
+        overlays.forEach { tv ->
+            val lp = tv.layoutParams as WindowManager.LayoutParams
+            lp.flags = if (t) lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            else lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            runCatching { wm.updateViewLayout(tv, lp) }
+        }
+    }
+
+    private fun forwardSwipe(x1: Float, y1: Float, x2: Float, y2: Float, dur: Long) {
+        if (gestureBusy) return
+        gestureBusy = true
+        setOverlaysTouchable(false)
+        handler.postDelayed({ if (gestureBusy) restoreTouch() }, 1500) // предохранитель
+        handler.postDelayed({
+            val path = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
+            val stroke = GestureDescription.StrokeDescription(path, 0, dur.coerceIn(60L, 400L))
+            val ok = dispatchGesture(
+                GestureDescription.Builder().addStroke(stroke).build(),
+                object : AccessibilityService.GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) = restoreTouch()
+                    override fun onCancelled(gestureDescription: GestureDescription?) = restoreTouch()
+                },
+                handler
+            )
+            if (!ok) restoreTouch()
+        }, 60)
+    }
+
+    private fun restoreTouch() {
+        gestureBusy = false
+        setOverlaysTouchable(true)
     }
 
     private fun clearOverlays() {

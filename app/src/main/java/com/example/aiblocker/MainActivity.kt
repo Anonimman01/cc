@@ -1,6 +1,9 @@
 package com.example.aiblocker
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
@@ -75,6 +78,30 @@ class MainActivity : Activity() {
                 }
             }
         })
+
+        // ---- Журнал ----
+        title(root, "Журнал работы")
+        val logView = TextView(this).apply {
+            textSize = 12f
+            setTextIsSelectable(true)
+        }
+        root.addView(Button(this).apply {
+            text = "Показать журнал"
+            setOnClickListener { logView.text = Dbg.read(this@MainActivity).ifBlank { "(пусто)" } }
+        })
+        root.addView(Button(this).apply {
+            text = "Скопировать журнал"
+            setOnClickListener {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("aiblocker log", Dbg.read(this@MainActivity)))
+                Toast.makeText(this@MainActivity, "Скопировано", Toast.LENGTH_SHORT).show()
+            }
+        })
+        root.addView(Button(this).apply {
+            text = "Очистить журнал"
+            setOnClickListener { Dbg.clear(this@MainActivity); logView.text = "" }
+        })
+        root.addView(logView)
 
         setContentView(ScrollView(this).apply { addView(root) })
     }
