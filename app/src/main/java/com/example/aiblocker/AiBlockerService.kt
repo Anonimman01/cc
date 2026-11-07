@@ -106,6 +106,7 @@ class AiBlockerService : AccessibilityService() {
         weak = toRegex(Rules.lines(Rules.get(this, Rules.K_WEAK)))
         channels = (Rules.lines(Rules.get(this, Rules.K_CHANNELS)) +
             Rules.lines(Rules.get(this, Rules.K_LEARNED))).map { it.lowercase() }
+        channelsNorm = channels.map { norm(it) }.filter { it.length >= 6 }.distinct()
         allow = Rules.lines(Rules.get(this, Rules.K_ALLOW)).map { it.lowercase() }
         llmPackages = Rules.lines(Rules.get(this, Rules.K_PACKAGES)).toSet()
         llmOn = Rules.get(this, Rules.K_LLM_ON) == "1" &&
@@ -139,10 +140,12 @@ class AiBlockerService : AccessibilityService() {
     /** 2 = сильное совпадение или канал из списка, 1 = достаточно слабых признаков, 0 = нет. */
     private fun norm(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
 
+    private var channelsNorm: List<String> = emptyList()
+
     private fun channelMatch(low: String): Boolean {
         if (channels.any { low.contains(it) }) return true
         val n = norm(low)
-        return channels.any { c -> val nc = norm(c); nc.length >= 6 && n.contains(nc) }
+        return channelsNorm.any { n.contains(it) }
     }
 
     private fun localLevel(text: String, low: String): Int {
