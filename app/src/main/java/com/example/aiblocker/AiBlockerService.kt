@@ -698,9 +698,9 @@ class AiBlockerService : AccessibilityService() {
 
     private fun addOverlay() {
         val tv = TextView(this).apply {
-            text = getString(R.string.overlay_text)
+            text = ""
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.rgb(30, 30, 30))
+            setBackgroundColor(Color.TRANSPARENT) // без тёмной плёнки: карточку видно, но нажатия перехватываются
             gravity = Gravity.CENTER
             textSize = 16f
         }
@@ -710,7 +710,7 @@ class AiBlockerService : AccessibilityService() {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.OPAQUE
+            PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             if (!overlayTouchable) flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
@@ -729,7 +729,7 @@ class AiBlockerService : AccessibilityService() {
                 val slop = resources.displayMetrics.density * 24
                 if (abs(ev.rawX - downX) > slop || abs(ev.rawY - downY) > slop) {
                     forwardSwipe(downX, downY, ev.rawX, ev.rawY, ev.eventTime - downT)
-                } else if (ev.eventTime - downT < 500) {
+                } else if (ev.eventTime - downT < 1000) {
                     onOverlayTap()
                 }
             }
