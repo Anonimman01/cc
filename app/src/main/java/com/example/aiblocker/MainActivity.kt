@@ -18,10 +18,11 @@ import android.widget.Toast
 class MainActivity : Activity() {
 
     private val fields = LinkedHashMap<String, EditText>()
-    private lateinit var llmSwitch: Switch
+    private val switches = LinkedHashMap<String, Switch>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Rules.migrate(this)
         val pad = (16 * resources.displayMetrics.density).toInt()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -33,16 +34,17 @@ class MainActivity : Activity() {
             setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         })
 
+        // ---- Скрытие ----
+        title(root, "Скрытие постов")
+        toggle(root, Rules.K_AUTO_HIDE, "Убирать пост через меню YouTube («Не рекомендовать канал»)")
+
         // ---- Groq ----
         title(root, "Проверка через Groq")
-        llmSwitch = Switch(this).apply {
-            text = "Включить (тексты карточек уходят на сервер Groq)"
-            isChecked = Rules.get(this@MainActivity, Rules.K_LLM_ON) == "1"
-        }
-        root.addView(llmSwitch)
+        toggle(root, Rules.K_LLM_ON, "Включить (тексты карточек уходят на сервер Groq)")
+        toggle(root, Rules.K_WATCH, "Читать страницу открытого видео (название, канал, описание) и запоминать каналы")
         single(root, Rules.K_API_KEY, "API-ключ Groq", password = true)
         single(root, Rules.K_MODEL, "Модель (если не работает, подставьте актуальную из консоли Groq)")
-        single(root, Rules.K_THRESHOLD, "Порог уверенности (0..1, по умолчанию 0.8)")
+        single(root, Rules.K_THRESHOLD, "Порог уверенности (0..1, по умолчанию 0.65)")
         multi(root, Rules.K_PACKAGES, "Приложения, чьи тексты можно отправлять (package, по одному в строке)", 2)
         multi(root, Rules.K_PROMPT, "Промпт для модели (что считать нежелательным)", 8)
 
@@ -57,7 +59,7 @@ class MainActivity : Activity() {
             text = "Сохранить"
             setOnClickListener {
                 fields.forEach { (k, v) -> Rules.set(this@MainActivity, k, v.text.toString().trim()) }
-                Rules.set(this@MainActivity, Rules.K_LLM_ON, if (llmSwitch.isChecked) "1" else "0")
+                switches.forEach { (k, s) -> Rules.set(this@MainActivity, k, if (s.isChecked) "1" else "0") }
                 Toast.makeText(this@MainActivity, "Сохранено", Toast.LENGTH_SHORT).show()
             }
         })
@@ -80,6 +82,16 @@ class MainActivity : Activity() {
             setTypeface(typeface, Typeface.BOLD)
             setPadding(0, 40, 0, 8)
         })
+    }
+
+    private fun toggle(parent: LinearLayout, key: String, label: String) {
+        val sw = Switch(this).apply {
+            text = label
+            isChecked = Rules.get(this@MainActivity, key) == "1"
+            setPadding(0, 12, 0, 12)
+        }
+        switches[key] = sw
+        parent.addView(sw)
     }
 
     private fun single(parent: LinearLayout, key: String, label: String, password: Boolean = false) {

@@ -8,16 +8,23 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import android.view.Gravity
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.TextView
+import android.widget.Toast
 import java.util.concurrent.Executors
+import kotlin.math.abs
 
 class AiBlockerService : AccessibilityService() {
 
-    private enum class Decision { BLOCK, PASS, NONE }
+    /** BLOCK: сильное совпадение (шаблон, канал, вердикт ИИ). SOFT: только слабые признаки, лишь плашка. */
+    private enum class Decision { BLOCK, SOFT, PASS, NONE }
+
+    private class Hit(val rect: Rect, val container: AccessibilityNodeInfo, val key: String, val auto: Boolean)
 
     // ---- правила (перечитываются при изменении настроек) ----
     private var strong: List<Regex> = emptyList()
@@ -26,6 +33,8 @@ class AiBlockerService : AccessibilityService() {
     private var allow: List<String> = emptyList()
     private var llmPackages: Set<String> = emptySet()
     private var llmOn = false
+    private var autoHide = true
+    private var watchOn = true
     private val weakThreshold = 2
 
     private val ignoredPackages = setOf(
@@ -42,6 +51,19 @@ class AiBlockerService : AccessibilityService() {
     private val executor = Executors.newSingleThreadExecutor()
     private var pauseUntil = 0L
 
+    // ---- страница видео ----
+    private var watchScheduled = false
+    private var lastProbeAt = 0L
+    private var lastWatchAt = 0L
+    private var lastWatchKey: String? = null
+
+    // ---- автоскрытие через меню YouTube ----
+    private val hideDone = LinkedHashSet<String>()
+    private var hideBusy = false
+    private var hideGen = 0
+    private var lastHideAt = 0L
+    private var lastFailToastAt = 0L
+
     private val handler = Handler(Looper.getMainLooper())
     private val scanRunnable = Runnable { scanScreen() }
     private val flushRunnable = Runnable { flush() }
@@ -55,6 +77,7 @@ class AiBlockerService : AccessibilityService() {
 
     override fun onServiceConnected() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        Rules.migrate(this)
         reloadRules()
         getSharedPreferences(Rules.PREFS, Context.MODE_PRIVATE)
             .registerOnSharedPreferenceChangeListener(prefsListener)
@@ -73,6 +96,8 @@ class AiBlockerService : AccessibilityService() {
         llmPackages = Rules.lines(Rules.get(this, Rules.K_PACKAGES)).toSet()
         llmOn = Rules.get(this, Rules.K_LLM_ON) == "1" &&
             Rules.get(this, Rules.K_API_KEY).isNotBlank()
+        autoHide = Rules.get(this, Rules.K_AUTO_HIDE) == "1"
+        watchOn = Rules.get(this, Rules.K_WATCH) == "1"
         verdicts.clear() // правила/порог могли поменяться
     }
 
@@ -96,10 +121,11 @@ class AiBlockerService : AccessibilityService() {
 
     // ---------------- решение по карточке ----------------
 
-    private fun localMatch(text: String, low: String): Boolean {
-        if (strong.any { it.containsMatchIn(text) }) return true
-        if (channels.any { low.contains(it) }) return true
-        return weak.count { it.containsMatchIn(text) } >= weakThreshold
+    /** 2 = сильное совпадение или канал из списка, 1 = достаточно слабых признаков, 0 = нет. */
+    private fun localLevel(text: String, low: String): Int {
+        if (strong.any { it.containsMatchIn(text) }) return 2
+        if (channels.any { low.contains(it) }) return 2
+        return if (weak.count { it.containsMatchIn(text) } >= weakThreshold) 1 else 0
     }
 
     private fun keyOf(text: String) =
@@ -108,7 +134,10 @@ class AiBlockerService : AccessibilityService() {
     private fun decide(text: String, pkg: String): Decision {
         val low = text.lowercase()
         if (allow.any { low.contains(it) }) return Decision.PASS
-        if (localMatch(text, low)) return Decision.BLOCK
+        when (localLevel(text, low)) {
+            2 -> return Decision.BLOCK
+            1 -> return Decision.SOFT
+        }
         if (llmOn && pkg in llmPackages && text.length in 30..800) {
             val key = keyOf(text)
             return when (verdicts[key]) {
@@ -139,9 +168,13 @@ class AiBlockerService : AccessibilityService() {
 
         val model = Rules.get(this, Rules.K_MODEL).trim()
         val prompt = Rules.get(this, Rules.K_PROMPT)
-        executor.execute {
-            val res = GroqClient.classify(apiKey, model, prompt, batch.map { it.second })
-            handler.post { onResult(batch, res) }
+        try {
+            executor.execute {
+                val res = GroqClient.classify(apiKey, model, prompt, batch.map { it.second })
+                handler.post { onResult(batch, res) }
+            }
+        } catch (e: Exception) {
+            batch.forEach { inflight.remove(it.first) }
         }
     }
 
@@ -151,7 +184,7 @@ class AiBlockerService : AccessibilityService() {
             pauseUntil = System.currentTimeMillis() + 60_000
             return
         }
-        val threshold = Rules.get(this, Rules.K_THRESHOLD).toDoubleOrNull() ?: 0.8
+        val threshold = Rules.get(this, Rules.K_THRESHOLD).toDoubleOrNull() ?: 0.65
         batch.forEachIndexed { i, (key, _) ->
             val v = res[i]
             val blocked = v != null && v.category != "normal" && v.confidence >= threshold
@@ -161,18 +194,237 @@ class AiBlockerService : AccessibilityService() {
         scanScreen()
     }
 
-    /** Канал, помеченный моделью 2 раза, попадает в список «выученных» и дальше блокируется локально. */
+    /** Канал, помеченный моделью 2 раза в ленте, попадает в список «выученных». */
     private fun learn(channel: String) {
-        val c = channel.trim()
-        if (c.length < 4) return
-        val low = c.lowercase()
-        if (allow.any { low.contains(it) || it.contains(low) }) return
+        val low = channel.trim().removePrefix("@").lowercase()
+        if (low.length < 5) return
         val n = (channelHits[low] ?: 0) + 1
         channelHits[low] = n
-        if (n >= 2 && channels.none { it == low }) {
-            val cur = Rules.get(this, Rules.K_LEARNED)
-            Rules.set(this, Rules.K_LEARNED, if (cur.isBlank()) c else cur + "\n" + c)
+        if (n >= 2) addLearned(channel)
+    }
+
+    private val stopNames = setOf("youtube", "shorts", "music", "канал", "unknown", "none", "n/a")
+
+    /** Добавляет канал в «выученные». Возвращает true, если добавлен новый. */
+    private fun addLearned(channel: String): Boolean {
+        val c = channel.trim().removePrefix("@").trim()
+        val low = c.lowercase()
+        if (c.length < 5 || low in stopNames) return false
+        if (allow.any { low.contains(it) || it.contains(low) }) return false
+        if (channels.any { it == low }) return false
+        val cur = Rules.get(this, Rules.K_LEARNED)
+        Rules.set(this, Rules.K_LEARNED, if (cur.isBlank()) c else cur + "\n" + c)
+        return true
+    }
+
+    // ---------------- страница видео: описание -> Groq ----------------
+
+    private val labelRe = Regex(
+        "(altered|synthetic)( or | and )(synthetic|altered)|измен[её]нн\\w+ или (синтетическ|искусственн)\\w+",
+        RegexOption.IGNORE_CASE
+    )
+    private val watchMarkers = listOf(
+        Regex("подписаться|subscribe", RegexOption.IGNORE_CASE),
+        Regex("нравится|\\blike\\b", RegexOption.IGNORE_CASE),
+        Regex("поделиться|\\bshare\\b", RegexOption.IGNORE_CASE),
+        Regex("комментари|\\bcomments?\\b", RegexOption.IGNORE_CASE),
+        Regex("скачать|сохранить|\\bdownload\\b|\\bsave\\b", RegexOption.IGNORE_CASE)
+    )
+
+    private fun collectTexts(root: AccessibilityNodeInfo): List<String> {
+        val out = ArrayList<String>()
+        val queue = java.util.ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var n = 0
+        while (n < 500) {
+            val node = queue.poll() ?: break
+            n++
+            if (!node.isVisibleToUser) continue
+            val t = node.text?.toString()?.trim().orEmpty()
+            val d = node.contentDescription?.toString()?.trim().orEmpty()
+            if (t.isNotEmpty()) out.add(t.take(600))
+            if (d.isNotEmpty() && d != t) out.add(d.take(600))
+            for (i in 0 until node.childCount) node.getChild(i)?.let { queue.add(it) }
         }
+        return out
+    }
+
+    private fun looksLikeWatchPage(texts: List<String>): Boolean {
+        val joined = texts.joinToString("\n")
+        return watchMarkers.count { it.containsMatchIn(joined) } >= 3
+    }
+
+    private fun probeWatch(root: AccessibilityNodeInfo) {
+        if (!watchOn || !llmOn || watchScheduled) return
+        val now = System.currentTimeMillis()
+        if (now < pauseUntil || now - lastProbeAt < 2000 || now - lastWatchAt < 20_000) return
+        lastProbeAt = now
+        val texts = collectTexts(root)
+        if (!looksLikeWatchPage(texts)) { lastWatchKey = null; return }
+        val longest = texts.maxByOrNull { it.length } ?: return
+        if (keyOf(longest) == lastWatchKey) return
+        watchScheduled = true
+        handler.postDelayed({ analyzeWatch() }, 2500) // даём странице догрузить описание
+    }
+
+    private fun analyzeWatch() {
+        watchScheduled = false
+        if (!watchOn || !llmOn) return
+        val root = rootInActiveWindow ?: return
+        val pkg = root.packageName?.toString() ?: return
+        if (pkg !in llmPackages || pkg in ignoredPackages) return
+        val texts = collectTexts(root)
+        if (!looksLikeWatchPage(texts)) return
+        val longest = texts.maxByOrNull { it.length } ?: return
+        lastWatchKey = keyOf(longest)
+        lastWatchAt = System.currentTimeMillis()
+
+        val page = texts.distinct().joinToString(" | ").take(1800)
+        val low = page.lowercase()
+        if (allow.any { low.contains(it) }) return
+        if (localLevel(page, low) == 2) return // уже закрывается локальными правилами
+        val label = labelRe.containsMatchIn(page)
+        val item = (if (label) "[YouTube показывает метку «изменённый или синтетический контент»] " else "") + page
+
+        val apiKey = Rules.get(this, Rules.K_API_KEY).trim()
+        if (apiKey.isEmpty()) return
+        val model = Rules.get(this, Rules.K_MODEL).trim()
+        val prompt = Rules.get(this, Rules.K_PROMPT)
+        try {
+            executor.execute {
+                val res = GroqClient.classify(apiKey, model, prompt, listOf(item), 1800)
+                handler.post { onWatchResult(res, label) }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "watch executor: $e")
+        }
+    }
+
+    private fun onWatchResult(res: Map<Int, GroqClient.Verdict>?, label: Boolean) {
+        if (res == null) { pauseUntil = System.currentTimeMillis() + 60_000; return }
+        val v = res[0] ?: return
+        val base = Rules.get(this, Rules.K_THRESHOLD).toDoubleOrNull() ?: 0.65
+        val threshold = if (label) minOf(base, 0.4) else base // с меткой YouTube порог ниже
+        if (v.category == "normal" || v.confidence < threshold) return
+        if (addLearned(v.channel)) {
+            toast("AI Blocker: канал «${v.channel.trim()}» добавлен в блок-лист")
+        } else if (v.channel.isBlank()) {
+            toast("AI Blocker: видео похоже на ИИ, но имя канала определить не удалось")
+        }
+    }
+
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+
+    // ---------------- автоскрытие: «Не рекомендовать канал» ----------------
+
+    private val menuRe = Regex(
+        "меню действий|ещё|ещё действия|дополнительные действия|more options|more actions|action menu|more",
+        RegexOption.IGNORE_CASE
+    )
+    private val dontRecommendRe = Regex(
+        "не рекомендовать.*канал|don.?t recommend.*channel", RegexOption.IGNORE_CASE
+    )
+    private val notInterestedRe = Regex("^(не интересует|not interested)$", RegexOption.IGNORE_CASE)
+    private val sheetRe = Regex(
+        "добавить в очередь|сохранить в плейлист|add to queue|save to playlist|не интересует|not interested",
+        RegexOption.IGNORE_CASE
+    )
+
+    private fun tryAutoHide(hits: List<Hit>, root: AccessibilityNodeInfo) {
+        if (!autoHide || hideBusy) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastHideAt < 4000) return
+        val h = hits.firstOrNull { it.auto && it.key !in hideDone } ?: return
+        hideDone.add(h.key)
+        if (hideDone.size > 300) hideDone.remove(hideDone.first())
+        val btn = findMenuButton(root, h.rect)
+        if (btn == null) { Log.d(TAG, "menu button not found for ${h.key}"); return }
+        hideBusy = true
+        lastHideAt = now
+        val gen = ++hideGen
+        handler.postDelayed({ if (hideGen == gen) hideBusy = false }, 7000) // предохранитель
+        if (!clickNode(btn)) { hideBusy = false; return }
+        handler.postDelayed({ pickMenuItem(0) }, 600)
+    }
+
+    private fun pickMenuItem(attempt: Int) {
+        val root = rootInActiveWindow
+        if (root == null) { finishHide(); return }
+        var target = findByText(root, dontRecommendRe)
+        if (target == null && attempt >= 3) target = findByText(root, notInterestedRe)
+        if (target != null && clickNode(target)) {
+            Log.d(TAG, "hidden via menu")
+            handler.postDelayed({ finishHide() }, 800)
+            return
+        }
+        if (attempt < 5) {
+            handler.postDelayed({ pickMenuItem(attempt + 1) }, 400)
+            return
+        }
+        // не нашли нужный пункт: если меню открыто, закрываем его
+        if (findByText(root, sheetRe) != null) performGlobalAction(GLOBAL_ACTION_BACK)
+        val now = SystemClock.uptimeMillis()
+        if (now - lastFailToastAt > 60_000) {
+            lastFailToastAt = now
+            toast("AI Blocker: в меню карточки нет пункта «Не рекомендовать канал»")
+        }
+        finishHide()
+    }
+
+    private fun finishHide() {
+        hideBusy = false
+        lastHideAt = SystemClock.uptimeMillis()
+    }
+
+    private fun findMenuButton(root: AccessibilityNodeInfo, rect: Rect): AccessibilityNodeInfo? {
+        val cands = ArrayList<AccessibilityNodeInfo>()
+        val queue = java.util.ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var n = 0
+        while (n < 700) {
+            val node = queue.poll() ?: break
+            n++
+            if (!node.isVisibleToUser) continue
+            val d = node.contentDescription?.toString()?.trim()
+            if (d != null && menuRe.matches(d)) cands.add(node)
+            for (i in 0 until node.childCount) node.getChild(i)?.let { queue.add(it) }
+        }
+        var best: AccessibilityNodeInfo? = null
+        var bestDist = Int.MAX_VALUE
+        val b = Rect()
+        for (c in cands) {
+            c.getBoundsInScreen(b)
+            val dist = if (rect.contains(b.centerX(), b.centerY())) 0 else abs(b.centerY() - rect.centerY())
+            if (dist < bestDist) { bestDist = dist; best = c }
+        }
+        val limit = (resources.displayMetrics.density * 160).toInt()
+        return if (bestDist <= limit) best else null
+    }
+
+    private fun findByText(root: AccessibilityNodeInfo, re: Regex): AccessibilityNodeInfo? {
+        val queue = java.util.ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var n = 0
+        while (n < 700) {
+            val node = queue.poll() ?: break
+            n++
+            val t = node.text?.toString()?.trim()
+            val d = node.contentDescription?.toString()?.trim()
+            if ((t != null && re.containsMatchIn(t)) || (d != null && re.containsMatchIn(d))) return node
+            for (i in 0 until node.childCount) node.getChild(i)?.let { queue.add(it) }
+        }
+        return null
+    }
+
+    private fun clickNode(node: AccessibilityNodeInfo): Boolean {
+        var cur: AccessibilityNodeInfo? = node
+        var i = 0
+        while (cur != null && i < 5) {
+            if (cur.isClickable && cur.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            cur = cur.parent
+            i++
+        }
+        return false
     }
 
     // ---------------- обход экрана и плашки ----------------
@@ -184,20 +436,29 @@ class AiBlockerService : AccessibilityService() {
             clearOverlays(); return
         }
         lastPkg = pkg
-        val rects = mutableListOf<Rect>()
-        walk(root, pkg, rects)
-        render(rects)
+        val hits = mutableListOf<Hit>()
+        walk(root, pkg, hits)
+        render(hits.map { it.rect })
+        if (pkg == YOUTUBE) tryAutoHide(hits, root)
+        if (pkg in llmPackages) probeWatch(root)
     }
 
-    private fun walk(node: AccessibilityNodeInfo, pkg: String, out: MutableList<Rect>) {
+    private fun walk(node: AccessibilityNodeInfo, pkg: String, out: MutableList<Hit>) {
         if (out.size >= maxOverlays || !node.isVisibleToUser) return
         val text = buildString {
             node.text?.let { append(it).append(' ') }
             node.contentDescription?.let { append(it) }
         }
         if (text.isNotBlank()) {
-            when (decide(text, pkg)) {
-                Decision.BLOCK -> { out.add(blockBounds(node)); return }
+            val d = decide(text, pkg)
+            when (d) {
+                Decision.BLOCK, Decision.SOFT -> {
+                    val (rect, container) = blockBounds(node)
+                    if (out.none { it.rect == rect }) {
+                        out.add(Hit(rect, container, keyOf(text), d == Decision.BLOCK))
+                    }
+                    return
+                }
                 Decision.PASS -> return // карточка уже проверена или ждёт проверки
                 Decision.NONE -> {}
             }
@@ -205,7 +466,7 @@ class AiBlockerService : AccessibilityService() {
         for (i in 0 until node.childCount) node.getChild(i)?.let { walk(it, pkg, out) }
     }
 
-    private fun blockBounds(node: AccessibilityNodeInfo): Rect {
+    private fun blockBounds(node: AccessibilityNodeInfo): Pair<Rect, AccessibilityNodeInfo> {
         val screenH = resources.displayMetrics.heightPixels
         val r = Rect()
         var cur = node
@@ -215,7 +476,7 @@ class AiBlockerService : AccessibilityService() {
             if (r.height() > screenH * 0.8) break
             cur = p
         }
-        return Rect().also { cur.getBoundsInScreen(it) }
+        return Pair(Rect().also { cur.getBoundsInScreen(it) }, cur)
     }
 
     private fun render(rects: List<Rect>) {
@@ -255,5 +516,10 @@ class AiBlockerService : AccessibilityService() {
         if (!::wm.isInitialized) return
         overlays.forEach { runCatching { wm.removeView(it) } }
         overlays.clear()
+    }
+
+    private companion object {
+        const val TAG = "AiBlocker"
+        const val YOUTUBE = "com.google.android.youtube"
     }
 }

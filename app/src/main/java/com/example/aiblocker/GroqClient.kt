@@ -1,5 +1,6 @@
 package com.example.aiblocker
 
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -10,21 +11,31 @@ object GroqClient {
 
     data class Verdict(val channel: String, val category: String, val confidence: Double)
 
+    private const val TAG = "AiBlocker"
     private const val ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 
     // Формат ответа задаём в коде, чтобы правка промпта в настройках его не сломала
     private const val FORMAT = """
 
-Каждая карточка дана строкой вида [номер] текст. Текст может содержать название видео, имя канала, начало описания канала, длительность, число просмотров.
+Каждая карточка дана строкой вида [номер] текст. Текст может содержать название видео, имя канала, начало описания канала, длительность, число просмотров. Карточка может быть и страницей видео с описанием: тогда опирайся и на описание.
 Верни ТОЛЬКО JSON-объект такого вида и ничего больше:
 {"results":[{"id":номер,"channel":"имя канала или пустая строка","category":"ai_generated|mini_drama_reupload|normal","confidence":число от 0 до 1}]}
 Верни по одному элементу на каждую карточку."""
 
-    /** Возвращает вердикты по индексу карточки или null при любой ошибке (сеть, лимит, неверный ключ). */
-    fun classify(apiKey: String, model: String, prompt: String, items: List<String>): Map<Int, Verdict>? {
+    /**
+     * Возвращает вердикты по индексу карточки или null при любой ошибке (сеть, лимит, неверный ключ).
+     * maxLen: сколько символов текста одной карточки отправлять (для страниц видео больше).
+     */
+    fun classify(
+        apiKey: String,
+        model: String,
+        prompt: String,
+        items: List<String>,
+        maxLen: Int = 500
+    ): Map<Int, Verdict>? {
         try {
             val user = items.mapIndexed { i, t ->
-                "[$i] " + t.replace('\n', ' ').take(500)
+                "[$i] " + t.replace('\n', ' ').take(maxLen)
             }.joinToString("\n")
 
             val messages = JSONArray()
@@ -45,7 +56,10 @@ object GroqClient {
                 setRequestProperty("Authorization", "Bearer $apiKey")
             }
             conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-            if (conn.responseCode !in 200..299) return null
+            if (conn.responseCode !in 200..299) {
+                Log.w(TAG, "Groq HTTP ${conn.responseCode}")
+                return null
+            }
 
             val resp = conn.inputStream.bufferedReader().use { it.readText() }
             var content = JSONObject(resp).getJSONArray("choices").getJSONObject(0)
@@ -67,6 +81,7 @@ object GroqClient {
             }
             return out
         } catch (e: Exception) {
+            Log.w(TAG, "Groq error: $e")
             return null
         }
     }
