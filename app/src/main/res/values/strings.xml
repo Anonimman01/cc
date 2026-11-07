@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">AI Blocker</string>
+    <string name="service_description">Читает текст на экране, находит метки ИИ-контента и закрывает такие посты плашкой. Если включена проверка через Groq, тексты карточек из выбранных приложений (по умолчанию YouTube) отправляются на сервер Groq для классификации.</string>
+    <string name="open_settings">Включить в настройках спец. возможностей</string>
+    <string name="hint">Найдите «AI Blocker» в списке служб и включите его.</string>
+    <string name="overlay_text">ИИ-контент скрыт</string>
+</resources>
