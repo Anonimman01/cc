@@ -46,6 +46,8 @@ class MainActivity : Activity() {
         toggle(root, Rules.K_WATCH, "Читать страницу открытого видео (название, канал, описание) и запоминать каналы")
         single(root, Rules.K_API_KEY, "API-ключ Groq", password = true)
         single(root, Rules.K_MODEL, "Модель (если не работает, подставьте актуальную из консоли Groq)")
+        single(root, Rules.K_API_KEY2, "Запасной API-ключ Groq (необязательно; пусто = использовать основной)", password = true)
+        single(root, Rules.K_MODEL2, "Запасная модель (включается, если основная вернула ошибку или лимит; пусто = отключить)")
         single(root, Rules.K_THRESHOLD, "Порог уверенности (0..1, по умолчанию 0.65)")
         multi(root, Rules.K_PACKAGES, "Приложения, чьи тексты можно отправлять (package, по одному в строке)", 2)
         multi(root, Rules.K_PROMPT, "Промпт для модели (что считать нежелательным)", 8)

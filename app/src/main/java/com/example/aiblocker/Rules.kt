@@ -13,6 +13,8 @@ object Rules {
     const val K_LLM_ON = "llm_on"      // "1" / "0"
     const val K_API_KEY = "api_key"
     const val K_MODEL = "model"
+    const val K_API_KEY2 = "api_key2"  // запасной ключ (необязательно)
+    const val K_MODEL2 = "model2"      // запасная модель (необязательно)
     const val K_THRESHOLD = "threshold"
     const val K_PACKAGES = "packages"  // в каких приложениях разрешено отправлять тексты в Groq
     const val K_PROMPT = "prompt"
@@ -138,6 +140,8 @@ TopLove
         K_LLM_ON to "0",
         K_API_KEY to "",
         K_MODEL to "llama-3.3-70b-versatile",
+        K_API_KEY2 to "",
+        K_MODEL2 to "llama-3.1-8b-instant",
         K_THRESHOLD to "0.65",
         K_PACKAGES to "com.google.android.youtube",
         K_PROMPT to PROMPT.trim(),

@@ -23,6 +23,26 @@ object GroqClient {
 Верни по одному элементу на каждую карточку."""
 
     /**
+     * Пробует основной ключ и модель; при ошибке (сеть, лимит, неверный ключ) повторяет запрос
+     * с запасными. Пустой запасной ключ означает «использовать основной», пустая модель -
+     * «использовать основную». Если запасных нет вовсе, повтора не будет.
+     */
+    fun classifyFallback(
+        apiKey: String, model: String,
+        apiKey2: String, model2: String,
+        prompt: String, items: List<String>, maxLen: Int = 500
+    ): Map<Int, Verdict>? {
+        val first = classify(apiKey, model, prompt, items, maxLen)
+        if (first != null) return first
+        if (apiKey2.isBlank() && model2.isBlank()) return null
+        val k = apiKey2.ifBlank { apiKey }
+        val m = model2.ifBlank { model }
+        if (k == apiKey && m == model) return null
+        Log.d(TAG, "fallback to backup key/model")
+        return classify(k, m, prompt, items, maxLen)
+    }
+
+    /**
      * Возвращает вердикты по индексу карточки или null при любой ошибке (сеть, лимит, неверный ключ).
      * maxLen: сколько символов текста одной карточки отправлять (для страниц видео больше).
      */

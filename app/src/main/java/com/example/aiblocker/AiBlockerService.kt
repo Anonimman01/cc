@@ -174,7 +174,9 @@ class AiBlockerService : AccessibilityService() {
         val prompt = Rules.get(this, Rules.K_PROMPT)
         try {
             executor.execute {
-                val res = GroqClient.classify(apiKey, model, prompt, batch.map { it.second })
+                val res = GroqClient.classifyFallback(
+                    apiKey, model, backupKey(), backupModel(), prompt, batch.map { it.second }
+                )
                 handler.post { onResult(batch, res) }
             }
         } catch (e: Exception) {
@@ -335,7 +337,9 @@ class AiBlockerService : AccessibilityService() {
         val prompt = Rules.get(this, Rules.K_PROMPT)
         try {
             executor.execute {
-                val res = GroqClient.classify(apiKey, model, prompt, listOf(item), 1800)
+                val res = GroqClient.classifyFallback(
+                    apiKey, model, backupKey(), backupModel(), prompt, listOf(item), 1800
+                )
                 handler.post { onWatchResult(res, label, watchKey) }
             }
         } catch (e: Exception) {
@@ -377,6 +381,9 @@ class AiBlockerService : AccessibilityService() {
         performGlobalAction(GLOBAL_ACTION_BACK)
         toast("AI Blocker: страница из блок-листа закрыта")
     }
+
+    private fun backupKey() = Rules.get(this, Rules.K_API_KEY2).trim()
+    private fun backupModel() = Rules.get(this, Rules.K_MODEL2).trim()
 
     private fun toast(msg: String, long: Boolean = true) =
         Toast.makeText(this, msg, if (long) Toast.LENGTH_LONG else Toast.LENGTH_SHORT).show()
