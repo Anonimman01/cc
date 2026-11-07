@@ -35,6 +35,7 @@ class AiBlockerService : AccessibilityService() {
     private var llmOn = false
     private var autoHide = true
     private var watchOn = true
+    private var closeOpen = true
     private val weakThreshold = 2
 
     private val ignoredPackages = setOf(
@@ -63,6 +64,8 @@ class AiBlockerService : AccessibilityService() {
     private var hideGen = 0
     private var lastHideAt = 0L
     private var lastFailToastAt = 0L
+    private var lastBackAt = 0L
+    private var lastOpenCheckAt = 0L
 
     private val handler = Handler(Looper.getMainLooper())
     private val scanRunnable = Runnable { scanScreen() }
@@ -98,6 +101,7 @@ class AiBlockerService : AccessibilityService() {
             Rules.get(this, Rules.K_API_KEY).isNotBlank()
         autoHide = Rules.get(this, Rules.K_AUTO_HIDE) == "1"
         watchOn = Rules.get(this, Rules.K_WATCH) == "1"
+        closeOpen = Rules.get(this, Rules.K_CLOSE) == "1"
         verdicts.clear() // правила/порог могли поменяться
     }
 
@@ -189,18 +193,20 @@ class AiBlockerService : AccessibilityService() {
             val v = res[i]
             val blocked = v != null && v.category != "normal" && v.confidence >= threshold
             verdicts[key] = blocked
-            if (blocked && v != null) learn(v.channel)
+            if (blocked && v != null) learn(v.channel, v.confidence)
         }
         scanScreen()
     }
 
-    /** Канал, помеченный моделью 2 раза в ленте, попадает в список «выученных». */
-    private fun learn(channel: String) {
+    /** Канал попадает в «выученные» после одного уверенного вердикта (>= 0.85) или двух обычных. */
+    private fun learn(channel: String, confidence: Double) {
         val low = channel.trim().removePrefix("@").lowercase()
         if (low.length < 5) return
         val n = (channelHits[low] ?: 0) + 1
         channelHits[low] = n
-        if (n >= 2) addLearned(channel)
+        if ((n >= 2 || confidence >= 0.85) && addLearned(channel)) {
+            toast("AI Blocker: канал «${channel.trim()}» добавлен в блок-лист", long = false)
+        }
     }
 
     private val stopNames = setOf("youtube", "shorts", "music", "канал", "unknown", "none", "n/a")
@@ -231,8 +237,11 @@ class AiBlockerService : AccessibilityService() {
         Regex("скачать|сохранить|\\bdownload\\b|\\bsave\\b", RegexOption.IGNORE_CASE)
     )
 
-    private fun collectTexts(root: AccessibilityNodeInfo): List<String> {
+    /** topOnly: только верхняя часть экрана (плеер, название, канал), без списка рекомендаций ниже. */
+    private fun collectTexts(root: AccessibilityNodeInfo, topOnly: Boolean = false): List<String> {
         val out = ArrayList<String>()
+        val limit = (resources.displayMetrics.heightPixels * 0.55).toInt()
+        val b = Rect()
         val queue = java.util.ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
         var n = 0
@@ -240,6 +249,10 @@ class AiBlockerService : AccessibilityService() {
             val node = queue.poll() ?: break
             n++
             if (!node.isVisibleToUser) continue
+            if (topOnly) {
+                node.getBoundsInScreen(b)
+                if (b.top > limit) continue
+            }
             val t = node.text?.toString()?.trim().orEmpty()
             val d = node.contentDescription?.toString()?.trim().orEmpty()
             if (t.isNotEmpty()) out.add(t.take(600))
@@ -254,13 +267,36 @@ class AiBlockerService : AccessibilityService() {
         return watchMarkers.count { it.containsMatchIn(joined) } >= 3
     }
 
+    private val channelTabs = listOf(
+        Regex("^(главная|home)\\b", RegexOption.IGNORE_CASE),
+        Regex("^(видео|videos)\\b", RegexOption.IGNORE_CASE),
+        Regex("^shorts\\b", RegexOption.IGNORE_CASE),
+        Regex("^(плейлисты|playlists)\\b", RegexOption.IGNORE_CASE),
+        Regex("^(сообщество|community)\\b", RegexOption.IGNORE_CASE),
+        Regex("^(о канале|about)\\b", RegexOption.IGNORE_CASE),
+        Regex("^(трансляции|прямые трансляции|live)\\b", RegexOption.IGNORE_CASE)
+    )
+
+    /** Страница канала: несколько вкладок (Главная, Видео, Shorts, ...) и кнопка «Подписаться». */
+    private fun looksLikeChannelPage(texts: List<String>): Boolean {
+        val tabs = channelTabs.count { re -> texts.any { re.containsMatchIn(it.trim()) } }
+        return tabs >= 3 && texts.any { watchMarkers[0].containsMatchIn(it) }
+    }
+
+    /** 0 = другое, 1 = страница видео, 2 = страница канала. */
+    private fun pageKind(texts: List<String>): Int = when {
+        looksLikeChannelPage(texts) -> 2
+        looksLikeWatchPage(texts) -> 1
+        else -> 0
+    }
+
     private fun probeWatch(root: AccessibilityNodeInfo) {
         if (!watchOn || !llmOn || watchScheduled) return
         val now = System.currentTimeMillis()
         if (now < pauseUntil || now - lastProbeAt < 2000 || now - lastWatchAt < 20_000) return
         lastProbeAt = now
         val texts = collectTexts(root)
-        if (!looksLikeWatchPage(texts)) { lastWatchKey = null; return }
+        if (pageKind(texts) == 0) { lastWatchKey = null; return }
         val longest = texts.maxByOrNull { it.length } ?: return
         if (keyOf(longest) == lastWatchKey) return
         watchScheduled = true
@@ -274,7 +310,8 @@ class AiBlockerService : AccessibilityService() {
         val pkg = root.packageName?.toString() ?: return
         if (pkg !in llmPackages || pkg in ignoredPackages) return
         val texts = collectTexts(root)
-        if (!looksLikeWatchPage(texts)) return
+        val kind = pageKind(texts)
+        if (kind == 0) return
         val longest = texts.maxByOrNull { it.length } ?: return
         lastWatchKey = keyOf(longest)
         lastWatchAt = System.currentTimeMillis()
@@ -283,8 +320,14 @@ class AiBlockerService : AccessibilityService() {
         val low = page.lowercase()
         if (allow.any { low.contains(it) }) return
         if (localLevel(page, low) == 2) return // уже закрывается локальными правилами
-        val label = labelRe.containsMatchIn(page)
-        val item = (if (label) "[YouTube показывает метку «изменённый или синтетический контент»] " else "") + page
+        val label = kind == 1 && labelRe.containsMatchIn(page)
+        val watchKey = lastWatchKey
+        val prefix = when {
+            kind == 2 -> "[СТРАНИЦА КАНАЛА: оцени канал целиком по описанию и последним видео] "
+            label -> "[YouTube показывает метку «изменённый или синтетический контент»] "
+            else -> ""
+        }
+        val item = prefix + page
 
         val apiKey = Rules.get(this, Rules.K_API_KEY).trim()
         if (apiKey.isEmpty()) return
@@ -293,14 +336,14 @@ class AiBlockerService : AccessibilityService() {
         try {
             executor.execute {
                 val res = GroqClient.classify(apiKey, model, prompt, listOf(item), 1800)
-                handler.post { onWatchResult(res, label) }
+                handler.post { onWatchResult(res, label, watchKey) }
             }
         } catch (e: Exception) {
             Log.w(TAG, "watch executor: $e")
         }
     }
 
-    private fun onWatchResult(res: Map<Int, GroqClient.Verdict>?, label: Boolean) {
+    private fun onWatchResult(res: Map<Int, GroqClient.Verdict>?, label: Boolean, key: String?) {
         if (res == null) { pauseUntil = System.currentTimeMillis() + 60_000; return }
         val v = res[0] ?: return
         val base = Rules.get(this, Rules.K_THRESHOLD).toDoubleOrNull() ?: 0.65
@@ -311,9 +354,32 @@ class AiBlockerService : AccessibilityService() {
         } else if (v.channel.isBlank()) {
             toast("AI Blocker: видео похоже на ИИ, но имя канала определить не удалось")
         }
+        // закрываем видео, только если пользователь всё ещё на той же странице
+        if (closeOpen && key != null && key == lastWatchKey &&
+            rootInActiveWindow?.packageName?.toString() == YOUTUBE) {
+            lastBackAt = SystemClock.uptimeMillis()
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        }
     }
 
-    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+    /** Если открыто видео/шортс из блок-листа (по названию и каналу в верхней части экрана), выходим назад. */
+    private fun checkOpenedBlocked(root: AccessibilityNodeInfo) {
+        if (!closeOpen) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastOpenCheckAt < 700 || now - lastBackAt < 2500) return
+        lastOpenCheckAt = now
+        if (pageKind(collectTexts(root)) == 0) return
+        val top = collectTexts(root, true).joinToString(" | ")
+        val low = top.lowercase()
+        if (allow.any { low.contains(it) }) return
+        if (localLevel(top, low) != 2) return
+        lastBackAt = now
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        toast("AI Blocker: страница из блок-листа закрыта")
+    }
+
+    private fun toast(msg: String, long: Boolean = true) =
+        Toast.makeText(this, msg, if (long) Toast.LENGTH_LONG else Toast.LENGTH_SHORT).show()
 
     // ---------------- автоскрытие: «Не рекомендовать канал» ----------------
 
@@ -439,7 +505,10 @@ class AiBlockerService : AccessibilityService() {
         val hits = mutableListOf<Hit>()
         walk(root, pkg, hits)
         render(hits.map { it.rect })
-        if (pkg == YOUTUBE) tryAutoHide(hits, root)
+        if (pkg == YOUTUBE) {
+            tryAutoHide(hits, root)
+            checkOpenedBlocked(root)
+        }
         if (pkg in llmPackages) probeWatch(root)
     }
 

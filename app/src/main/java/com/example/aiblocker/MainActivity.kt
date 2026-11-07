@@ -38,6 +38,8 @@ class MainActivity : Activity() {
         title(root, "Скрытие постов")
         toggle(root, Rules.K_AUTO_HIDE, "Убирать пост через меню YouTube («Не рекомендовать канал»)")
 
+        toggle(root, Rules.K_CLOSE, "Закрывать открытое видео из блок-листа (кнопка «Назад»)")
+
         // ---- Groq ----
         title(root, "Проверка через Groq")
         toggle(root, Rules.K_LLM_ON, "Включить (тексты карточек уходят на сервер Groq)")
