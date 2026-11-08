@@ -257,11 +257,14 @@ class AiBlockerService : AccessibilityService() {
         RegexOption.IGNORE_CASE
     )
     private val watchMarkers = listOf(
-        Regex("подписаться|subscribe", RegexOption.IGNORE_CASE),
+        // в приложении кнопка часто называется «Оформить подписку на канал»
+        Regex("подписаться|оформить подписку|подписку на канал|subscribe", RegexOption.IGNORE_CASE),
         Regex("нравится|\\blike\\b", RegexOption.IGNORE_CASE),
         Regex("поделиться|\\bshare\\b", RegexOption.IGNORE_CASE),
         Regex("комментари|\\bcomments?\\b", RegexOption.IGNORE_CASE),
-        Regex("скачать|сохранить|\\bdownload\\b|\\bsave\\b", RegexOption.IGNORE_CASE)
+        Regex("скачать|сохранить|другие действия|ремикс|\\bdownload\\b|\\bsave\\b|\\bremix\\b", RegexOption.IGNORE_CASE),
+        // плеер: «Видеопроигрыватель», «0 минут 2 секунды из 52 минуты»
+        Regex("видеопроигрыватель|video player|(минут|секунд|час)\\p{L}* из \\d", RegexOption.IGNORE_CASE)
     )
 
     /** topOnly: только верхняя часть экрана (плеер, название, канал), без списка рекомендаций ниже. */
@@ -515,6 +518,8 @@ class AiBlockerService : AccessibilityService() {
         if (!autoHide || hideBusy) return
         // на странице поиска не нажимаем «⋮»: меню там другое, и нажатие попадает в видео
         if (findByText(root, searchScreenRe) != null) return
+        // на странице открытого видео тоже: рекомендации закрываем плашкой, а не через меню
+        if (pageKind(collectTexts(root)) == 1) return
         val now = SystemClock.uptimeMillis()
         if (now - lastHideAt < 4000) return
         val h = hits.firstOrNull { it.auto && it.key !in hideDone } ?: return
