@@ -69,6 +69,8 @@ object GroqClient {
                 .put("temperature", 0)
                 .put("response_format", JSONObject().put("type", "json_object"))
                 .put("messages", messages)
+            // gpt-oss думает перед ответом: низкий уровень, чтобы ответ приходил быстро и не упирался в лимит
+            if (model.startsWith("openai/gpt-oss")) body.put("reasoning_effort", "low")
 
             val conn = (URL(ENDPOINT).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"

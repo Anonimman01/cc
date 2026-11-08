@@ -49,6 +49,7 @@ object Rules {
     const val K_REDIRECT_DELAY = "redirect_sec" // через сколько секунд
     const val K_TAP_REDIRECT = "tap_redirect"   // "1": нажатие по плашке сразу открывает ссылку из списка
     private const val K_VER_REDIRECT = "ver_redirect"
+    private const val K_VER_MODELS = "ver_models"
     const val K_VERSION = "ver"         // версия набора значений по умолчанию
 
     private const val VERSION = 2
@@ -167,9 +168,9 @@ TopLove
         K_LEARNED to "",
         K_LLM_ON to "0",
         K_API_KEY to "",
-        K_MODEL to "llama-3.3-70b-versatile",
+        K_MODEL to "openai/gpt-oss-120b",
         K_API_KEY2 to "",
-        K_MODEL2 to "llama-3.1-8b-instant",
+        K_MODEL2 to "openai/gpt-oss-20b",
         K_THRESHOLD to "0.65",
         K_PACKAGES to "com.google.android.youtube",
         K_PROMPT to PROMPT.trim(),
@@ -203,6 +204,13 @@ TopLove
         // отдельная миграция: задержка перехода теперь 0 по умолчанию (остальные настройки не трогаем)
         if (sp.getInt(K_VER_REDIRECT, 0) < 1) {
             sp.edit().putString(K_REDIRECT_DELAY, "0").putInt(K_VER_REDIRECT, 1).apply()
+        }
+        // Groq закрыл llama-3.3-70b-versatile и llama-3.1-8b-instant (HTTP 404): меняем только модели
+        if (sp.getInt(K_VER_MODELS, 0) < 1) {
+            val ed = sp.edit().putInt(K_VER_MODELS, 1)
+            if (sp.getString(K_MODEL, null)?.startsWith("llama") != false) ed.putString(K_MODEL, defaults.getValue(K_MODEL))
+            if (sp.getString(K_MODEL2, null)?.startsWith("llama") != false) ed.putString(K_MODEL2, defaults.getValue(K_MODEL2))
+            ed.apply()
         }
         if (sp.getInt(K_VERSION, 0) >= VERSION) return
         val old = lines(OLD_STRONG).toSet()
