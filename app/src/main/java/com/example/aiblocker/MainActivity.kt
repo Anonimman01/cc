@@ -65,6 +65,23 @@ class MainActivity : Activity() {
         multi(root, Rules.K_ALLOW, "НЕ блокировать эти каналы (имеет приоритет над всем)", 3)
         multi(root, Rules.K_LEARNED, "Выученные каналы (добавляются автоматически; лишнее удалите)", 4)
         fileList(root, Rules.K_CHANNELS, 202, "Каналы/авторы (файл .txt, одно название в строке)", "каналов")
+        toggle(root, Rules.K_SYNC_ON, "Раз в сутки подтягивать новые каналы по ссылке (добавляются к списку выше)")
+        single(root, Rules.K_SYNC_URL, "Ссылка на список каналов (txt, одно название в строке; должна открываться без входа)")
+        root.addView(Button(this).apply {
+            text = "Обновить каналы по ссылке сейчас"
+            setOnClickListener {
+                // ссылку берём из поля, даже если ещё не нажали «Сохранить»
+                fields[Rules.K_SYNC_URL]?.let { Rules.set(this@MainActivity, Rules.K_SYNC_URL, it.text.toString().trim()) }
+                ChannelSync.run(this@MainActivity) { n ->
+                    runOnUiThread {
+                        refreshInfo(Rules.K_CHANNELS)
+                        Toast.makeText(this@MainActivity,
+                            if (n >= 0) "Добавлено каналов: $n" else "Не удалось загрузить (см. журнал)",
+                            Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        })
         multi(root, Rules.K_STRONG, "Сильные шаблоны (regex, достаточно одного совпадения)", 6)
         multi(root, Rules.K_WEAK, "Слабые признаки (regex, закрываем при 2+ совпадениях)", 6)
 
@@ -112,6 +129,7 @@ class MainActivity : Activity() {
         root.addView(logView)
 
         setContentView(ScrollView(this).apply { addView(root) })
+        ChannelSync.maybeAuto(this) { runOnUiThread { refreshInfo(Rules.K_CHANNELS) } }
     }
 
     /** Список из файла: счётчик, «Загрузить из .txt» (добавляет без дублей) и «Очистить». Сохраняется сразу. */

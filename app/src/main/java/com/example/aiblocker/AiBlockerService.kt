@@ -95,6 +95,7 @@ class AiBlockerService : AccessibilityService() {
         reloadRules()
         getSharedPreferences(Rules.PREFS, Context.MODE_PRIVATE)
             .registerOnSharedPreferenceChangeListener(prefsListener)
+        ChannelSync.maybeAuto(this)
     }
 
     private fun toRegex(lines: List<String>) = lines.mapNotNull {
@@ -375,6 +376,8 @@ class AiBlockerService : AccessibilityService() {
         if (res == null) {
             pauseUntil = System.currentTimeMillis() + pauseSec() * 1000L
             Dbg.add(this, "Groq: ошибка (страница) ${GroqClient.lastError}, пауза ${pauseSec()} с")
+            // не помечаем страницу проверенной: после паузы проверим её снова (нет сети, лимит, неверная модель)
+            if (key != null && key == lastWatchKey) lastWatchKey = null
             return
         }
         val v = res[0] ?: return
@@ -503,8 +506,15 @@ class AiBlockerService : AccessibilityService() {
         RegexOption.IGNORE_CASE
     )
 
+    /** Признак экрана поиска YouTube: кнопка голосового поиска в верхней строке. */
+    private val searchScreenRe = Regex("голосовой поиск|voice search", RegexOption.IGNORE_CASE)
+    /** Строки подсказок под строкой поиска: это не карточки видео. */
+    private val suggestionRe = Regex("^(изменить подсказку|edit suggestion)", RegexOption.IGNORE_CASE)
+
     private fun tryAutoHide(hits: List<Hit>, root: AccessibilityNodeInfo) {
         if (!autoHide || hideBusy) return
+        // на странице поиска не нажимаем «⋮»: меню там другое, и нажатие попадает в видео
+        if (findByText(root, searchScreenRe) != null) return
         val now = SystemClock.uptimeMillis()
         if (now - lastHideAt < 4000) return
         val h = hits.firstOrNull { it.auto && it.key !in hideDone } ?: return
@@ -654,6 +664,7 @@ class AiBlockerService : AccessibilityService() {
             node.text?.let { append(it).append(' ') }
             node.contentDescription?.let { append(it) }
         }
+        if (node.className?.contains("EditText") == true || suggestionRe.containsMatchIn(text.trim())) return
         if (text.isNotBlank()) {
             val d = decide(text, pkg)
             when (d) {

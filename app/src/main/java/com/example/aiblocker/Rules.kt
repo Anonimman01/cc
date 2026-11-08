@@ -50,6 +50,10 @@ object Rules {
     const val K_TAP_REDIRECT = "tap_redirect"   // "1": нажатие по плашке сразу открывает ссылку из списка
     private const val K_VER_REDIRECT = "ver_redirect"
     private const val K_VER_MODELS = "ver_models"
+    private const val K_VER_RULES = "ver_rules"
+    const val K_SYNC_ON = "sync_on"     // "1": раз в сутки подтягивать список каналов по ссылке
+    const val K_SYNC_URL = "sync_url"   // ссылка на txt (одно название в строке)
+    const val K_SYNC_AT = "sync_at"     // время последнего обновления (мс)
     const val K_VERSION = "ver"         // версия набора значений по умолчанию
 
     private const val VERSION = 2
@@ -152,6 +156,16 @@ TopLove
 бог войны
 владыка драконов"""
 
+    /** Правила по названию: дорама/мини-драма вместе с типичным кликбейтом (в любом порядке). */
+    private const val STRONG_ADD = """
+(дорам|мини-?драм)[\p{L}]*.{0,150}(озвучк|миллиардер|\bceo\b|босс|президент|наследни)
+(озвучк|миллиардер|\bceo\b|босс|президент|наследни).{0,150}(дорам|мини-?драм)"""
+
+    /** «Китайские дорамы» в названии: два слабых признака вместе дают плашку (без автоскрытия и без обучения). */
+    private const val WEAK_ADD = """
+китайск[\p{L}]* (дорам|драм|сериал|мини)
+русск[\p{L}]* озвучк"""
+
     private const val PROMPT = """Ты фильтр контента для YouTube. Для каждой карточки определи, относится ли она к категориям, которые пользователь хочет скрыть:
 - ai_generated: видео или канал сделаны нейросетью. Признаки: ИИ-видео (Sora, Veo, Kling, Runway, Pika), ИИ-картинки и слайдшоу с синтетической озвучкой, ИИ-музыка (Suno, Udio), шаблонные «слоп»-ролики и шортсы (выдуманные истории про животных, детей, военных, фейковые новости, «невероятные» сцены), конвейерные каналы с однотипными заголовками, метки AI / ИИ / нейросеть, указание, что видео изменено или синтетическое.
 - mini_drama_reupload: каналы-перезаливы коротких китайских мини-дорам с русской озвучкой и шаблонными кликбейтными заголовками (миллиардер, CEO, босс, «все пали на колени», месть, возвращение наследницы и т.п.).
@@ -161,9 +175,9 @@ TopLove
 Если сомневаешься, выбирай normal и ставь низкую уверенность."""
 
     val defaults: Map<String, String> = mapOf(
-        K_STRONG to STRONG.trim(),
+        K_STRONG to (STRONG.trim() + "\n" + STRONG_ADD.trim()),
         K_CHANNELS to CHANNELS.trim(),
-        K_WEAK to WEAK.trim(),
+        K_WEAK to (WEAK.trim() + "\n" + WEAK_ADD.trim()),
         K_ALLOW to "",
         K_LEARNED to "",
         K_LLM_ON to "0",
@@ -179,7 +193,10 @@ TopLove
         K_CLOSE to "1",
         K_REDIRECT to "https://www.youtube.com/live/akBFTyfKTrA?si=G1UBehIjJyz3N5lq",
         K_REDIRECT_DELAY to "0",
-        K_TAP_REDIRECT to "1"
+        K_TAP_REDIRECT to "1",
+        K_SYNC_ON to "1",
+        K_SYNC_URL to ChannelSync.DEFAULT_URL,
+        K_SYNC_AT to "0"
     )
 
     fun get(ctx: Context, key: String): String =
@@ -211,6 +228,12 @@ TopLove
             if (sp.getString(K_MODEL, null)?.startsWith("llama") != false) ed.putString(K_MODEL, defaults.getValue(K_MODEL))
             if (sp.getString(K_MODEL2, null)?.startsWith("llama") != false) ed.putString(K_MODEL2, defaults.getValue(K_MODEL2))
             ed.apply()
+        }
+        // новые правила по названию добавляем к сохранённым спискам, пользовательские строки не трогаем
+        if (sp.getInt(K_VER_RULES, 0) < 1) {
+            val strong = (lines(get(ctx, K_STRONG)) + lines(STRONG_ADD)).distinct().joinToString("\n")
+            val weak = (lines(get(ctx, K_WEAK)) + lines(WEAK_ADD)).distinct().joinToString("\n")
+            sp.edit().putString(K_STRONG, strong).putString(K_WEAK, weak).putInt(K_VER_RULES, 1).apply()
         }
         if (sp.getInt(K_VERSION, 0) >= VERSION) return
         val old = lines(OLD_STRONG).toSet()
