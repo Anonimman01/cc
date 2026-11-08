@@ -375,6 +375,8 @@ class AiBlockerService : AccessibilityService() {
         if (res == null) {
             pauseUntil = System.currentTimeMillis() + pauseSec() * 1000L
             Dbg.add(this, "Groq: ошибка (страница) ${GroqClient.lastError}, пауза ${pauseSec()} с")
+            // не помечаем страницу проверенной: после паузы проверим её снова (нет сети, лимит, неверная модель)
+            if (key != null && key == lastWatchKey) lastWatchKey = null
             return
         }
         val v = res[0] ?: return
